@@ -13,7 +13,7 @@ from hamer.utils.renderer import Renderer, cam_crop_to_full
 
 LIGHT_BLUE=(0.65098039,  0.74117647,  0.85882353)
 
-from vitpose_model import ViTPoseModel
+from hamer.vitpose_model import ViTPoseModel
 
 import json
 from typing import Dict, Optional

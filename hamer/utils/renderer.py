@@ -1,6 +1,5 @@
 import os
-if 'PYOPENGL_PLATFORM' not in os.environ:
-    os.environ['PYOPENGL_PLATFORM'] = 'egl'
+os.environ['PYOPENGL_PLATFORM'] = 'osmesa' # Alternatively, 'egl': hardware accelereated rendering 
 import torch
 import numpy as np
 import pyrender
@@ -195,9 +194,13 @@ class Renderer:
             image = image + torch.tensor(self.cfg.MODEL.IMAGE_MEAN, device=image.device).reshape(3,1,1)
             image = image.permute(1, 2, 0).cpu().numpy()
 
+
         renderer = pyrender.OffscreenRenderer(viewport_width=image.shape[1],
                                               viewport_height=image.shape[0],
                                               point_size=1.0)
+        # Now there *is* a current context:
+
+
         material = pyrender.MetallicRoughnessMaterial(
             metallicFactor=0.0,
             alphaMode='OPAQUE',
@@ -233,6 +236,7 @@ class Renderer:
 
         color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
         color = color.astype(np.float32) / 255.0
+        color[:, :, 3] = 0.5  # Set alpha channel to 0.5
         renderer.delete()
 
         if return_rgba:
@@ -342,36 +346,48 @@ class Renderer:
             render_res=[256, 256],
             focal_length=None,
             is_right=None,
+            intrinsic_matrix=None,
+            mesh_list = None,
         ):
 
-        renderer = pyrender.OffscreenRenderer(viewport_width=render_res[0],
-                                              viewport_height=render_res[1],
-                                              point_size=1.0)
-        # material = pyrender.MetallicRoughnessMaterial(
-        #     metallicFactor=0.0,
-        #     alphaMode='OPAQUE',
-        #     baseColorFactor=(*mesh_base_color, 1.0))
+        # Create an offscreen renderer
+        offscreen_renderer = pyrender.OffscreenRenderer(
+            viewport_width=render_res[0],
+            viewport_height=render_res[1],
+            point_size=1.0
+        )
 
-        if is_right is None:
-            is_right = [1 for _ in range(len(vertices))]
+        # Convert the trimesh to a pyrender mesh
+        pyrender_mesh = pyrender.Mesh.from_trimesh(mesh_list[0])
 
-        mesh_list = [pyrender.Mesh.from_trimesh(self.vertices_to_trimesh(vvv, ttt.copy(), mesh_base_color, rot_axis, rot_angle, is_right=sss)) for vvv,ttt,sss in zip(vertices, cam_t, is_right)]
+        # Create a scene and add the mesh
+        scene = pyrender.Scene(
+            bg_color=[*scene_bg_color, 0.0],
+            ambient_light=(0.3, 0.3, 0.3)
+        )
+        scene.add(pyrender_mesh, 'mesh')
 
-        scene = pyrender.Scene(bg_color=[*scene_bg_color, 0.0],
-                               ambient_light=(0.3, 0.3, 0.3))
-        for i,mesh in enumerate(mesh_list):
-            scene.add(mesh, f'mesh_{i}')
-
+        # Set up the camera using the intrinsics
         camera_pose = np.eye(4)
-        # camera_pose[:3, 3] = camera_translation
-        camera_center = [render_res[0] / 2., render_res[1] / 2.]
-        focal_length = focal_length if focal_length is not None else self.focal_length
-        camera = pyrender.IntrinsicsCamera(fx=focal_length, fy=focal_length,
-                                           cx=camera_center[0], cy=camera_center[1], zfar=1e12)
+        if cam_t is not None and len(cam_t) > 0:
+            camera_translation = cam_t[0].copy()
+            camera_translation[0] *= -1.  # Flip x-axis to match OpenGL convention
+            camera_pose[:3, 3] = camera_translation
 
-        # Create camera node and add it to pyRender scene
+        camera_center = [intrinsic_matrix[0, 2], intrinsic_matrix[1, 2]]
+        camera = pyrender.IntrinsicsCamera(
+            fx=intrinsic_matrix[0, 0], 
+            fy=intrinsic_matrix[1, 1],
+            cx=camera_center[0], 
+            cy=camera_center[1], 
+            zfar=1e12
+        )
+
+        # Add the camera to the scene
         camera_node = pyrender.Node(camera=camera, matrix=camera_pose)
         scene.add_node(camera_node)
+
+        # Add lighting to the scene
         self.add_point_lighting(scene, camera_node)
         self.add_lighting(scene, camera_node)
 
@@ -379,9 +395,13 @@ class Renderer:
         for node in light_nodes:
             scene.add_node(node)
 
-        color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+        color, rend_depth = offscreen_renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
         color = color.astype(np.float32) / 255.0
-        renderer.delete()
+        color = np.concatenate([color, np.ones((color.shape[0], color.shape[1], 1))], axis=-1)
+        color[..., 3] = 0.5  # Set alpha channel to 0.5
+
+        # Clean up
+        offscreen_renderer.delete()
 
         return color
 
